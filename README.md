@@ -1,2 +1,2 @@
-# MINFLUX_msr_parser
+# MINFLUX_msr_reader
 parse and export Aberrior MINFLUX msr data
