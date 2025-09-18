@@ -1,0 +1,39 @@
+[tool.poetry]
+name = "mfx-msr"
+version = "0.1.0"
+description = "Parsers and exporters for MINFLUX .msr with UI"
+authors = ["ziqiang.huang@embl.de"]
+readme = "README.md"
+packages = [{include = "minflux_msr"}, {include = "ui_tk"}]
+
+[tool.poetry.dependencies]
+python = ">=3.9,<3.15"
+numpy = ">=1.21,<2.0"
+scipy = ">=1.8,<2.0"
+tifffile = "^2024.2"
+click = "^8.1"
+zarr = "^2.17.0"
+specpy = { path = "C:/Imspector/Versions/16.3.21317-m2410-win64-BASE/python/specpy/SpecPy-Python3.9.2-NumPy1.20.1/specpy-1.2.3-cp39-cp39-win_amd64.whl" }
+msr-reader = "*"    # Legacy MSR/OBF reader (module is `msr_reader`)
+orjson = { version = "^3.9", optional = true }
+hdf5storage = { version = "^0.1.19", optional = true }
+
+
+
+[tool.poetry.extras]
+speed = ["orjson"]
+mat73 = ["hdf5storage"]
+dnd = ["tkinterdnd2"]
+bioformats = ["python-bioformats", "javabridge"]
+legacy = ["msr-reader"]
+
+[tool.poetry.scripts]
+mfx-msr-cli = "minflux_msr.cli:main"
+mfx-msr-gui = "ui_tk.app:main"
+
+[tool.poetry.group.dev.dependencies]
+pyinstaller = "^6.15.0"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
