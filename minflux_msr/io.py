@@ -4,10 +4,11 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional
 import numpy as np
 import zarr
-import specpy
 
 from .utils import slug
 from .state import reset as reset_state, set_mfx_for, set_mbm_for
+
+import specpy
 
 # -------- existing: collect_zarr_fields (unchanged) --------
 def collect_zarr_fields(zroot: str) -> List[Dict[str, Any]]:
@@ -91,14 +92,6 @@ def _dtype_fields_tree(dt: np.dtype, n_rows: int):
             "shape": subshape,
             "logical_shape": _logical_shape_str_for_field(n_rows, subshape),
         }
-        
-        print("")
-        shape = getattr(sub_dt, "shape", None)
-        print("debug: dtype_fileds_tree: name: " + name)
-        print("debug: dtype_fileds_tree: dtype: " + str(base))
-        print("debug: dtype_fileds_tree: shape: " + str(shape))
-        print("")
-        
         if getattr(sub_dt, "names", None):          # nested struct
             node["kind"] = "struct"
             node["children"] = _dtype_fields_tree(sub_dt, n_rows)
@@ -335,116 +328,9 @@ def _build_legacy_series_tree_entries(msr_file: str, meta) -> list[dict]:
 
 # -------- NEW: unified parse for UI --------
 def parse_msr_general(msr_file: str, tmp_dir: str, log=print) -> Dict[str, Any]:
-    """
-    Unified parse for UI:
-      - If modern: unpack all datasets to Zarr, build trees; set globals mfx/mbm from the FIRST dataset.
-      - If legacy: print metadata, try to set mfx from MF/data {0} (if msr-reader present).
-    Returns:
-      {
-        "mode": "modern"|"legacy",
-        "msr": "<path>",
-        # modern only:
-        "datasets": [ {did, display_name, zroot, fields:list} , ... ],
-        # legacy only:
-        "metadata": dict|None,
-      }
-    """
-    reset_state()
-    msr_path = Path(msr_file)
-    out_root = Path(tmp_dir) / f"msr_{msr_path.stem}"
-    out_root.mkdir(parents=True, exist_ok=True)
+    from .msr_parser import parse_general
 
-    # load msr file with SpecPy package
-    f = specpy.File(str(msr_file), specpy.File.Read)
-
-    # Try modern
-    try:
-        info = f.minflux_datasets() or []               # modern format
-    except Exception as e:
-        log(f"[warn] minflux_datasets() failed: {e}")   # legacy format
-        info = []
-
-    if info:
-        log(f"[parse] modern MINFLUX file: {len(info)} dataset(s)")
-        datasets = []
-        first_mfx = None
-        first_mbm = None
-        for i, ds in enumerate(info):       # index, dataset
-            did = ds.get("did")
-            name = ds.get("name") or ds.get("label") or str(did)
-            key = name or str(did)  # <-- use as map key
-            ds_dir = out_root / slug(name)
-            ds_dir.mkdir(parents=True, exist_ok=True)       # zarr folder in temp folder
-            log(f"  ds#{i} did={did} name={name} -> {ds_dir}")
-            f.unpack(did, str(ds_dir))                      # export zarr data to zarr folder
-            zroot = ds_dir / "zarr"                         # retrieve the zarr root folder path
-
-            fields = []
-            if zroot.is_dir():
-                try:
-                    fields = collect_zarr_fields(str(zroot))
-                except Exception as e:
-                    log(f"    [warn] collect fields failed: {e}")
-
-                # NEW: load arrays into state maps (per dataset)
-                try:
-                    arch = zarr.open(str(zroot), mode="r")
-                    if "mfx" in arch:
-                        arr = arch["mfx"][:]  # NOTE: loads into RAM
-                        from .state import set_mfx_for
-                        set_mfx_for(key, arr)
-                        log(f"    [mfx] loaded: key='{key}' shape={arr.shape} dtype={arr.dtype}")
-                    if "grd/mbm/points" in arch:
-                        arr = arch["grd/mbm/points"][:]
-                        from .state import set_mbm_for
-                        set_mbm_for(key, arr)
-                        log(f"    [mbm] loaded: key='{key}' shape={arr.shape} dtype={arr.dtype}")
-                except Exception as e:
-                    log(f"    [warn] array load failed: {e}")
-
-            datasets.append({
-                "did": str(did),
-                "display_name": name,
-                "zroot": str(zroot),
-                "fields": fields,
-            })
-        if first_mfx is not None:
-            set_mfx(first_mfx)
-            log(f"  [mfx] loaded into memory: shape={first_mfx.shape}, dtype={first_mfx.dtype}")
-        if first_mbm is not None:
-            set_mbm(first_mbm)
-            log(f"  [mbm] loaded into memory: shape={first_mbm.shape}, dtype={first_mbm.dtype}")
-
-        return {"mode": "modern", "msr": str(msr_file), "datasets": datasets}
-
-    # Legacy path
-    log("[parse] legacy/OBF-style file (no minflux_datasets)")
-    try:
-        meta = f.metadata()
-        log("OME-XML metadata loaded; showing in UI")
-    except Exception as e:
-        meta = None
-        log(f"[warn] metadata() failed: {e}")
-
-    # Try to load MF/data as mfx equivalent (optional)
-    legacy_mfx = _try_load_legacy_mfx(str(msr_file), log=log)
-    if legacy_mfx is not None:
-        try:
-            from .state import set_mfx_for
-            set_mfx_for("legacy", legacy_mfx)
-        except Exception:
-            pass
-        log(f"  [legacy mfx] 1-D vector loaded: shape={legacy_mfx.shape}, dtype={legacy_mfx.dtype}")
-
-    # Build entries for the UI tree (Series rows with shape + dtype)
-    legacy_series_tree = _build_legacy_series_tree_entries(str(msr_file), meta)
-
-    return {
-        "mode": "legacy",
-        "msr": str(msr_file),
-        "metadata": meta,
-        "legacy_series_tree": legacy_series_tree,  # NEW
-    }
+    return parse_general(msr_file, tmp_dir, log=log)
 
 # --- Back-compat wrapper: prefer parse_msr_general() ---
 def parse_msr_to_tree(msr_file: str, tmp_dir: str, log=print):

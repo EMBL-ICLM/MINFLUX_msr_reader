@@ -1,0 +1,8 @@
+pyproject.toml
+setup.py
+specpy/specpy.py
+specpy/version.py
+specpy/specpy.egg-info/PKG-INFO
+specpy/specpy.egg-info/SOURCES.txt
+specpy/specpy.egg-info/dependency_links.txt
+specpy/specpy.egg-info/top_level.txt

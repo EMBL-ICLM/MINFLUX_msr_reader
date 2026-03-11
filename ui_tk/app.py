@@ -1,5 +1,7 @@
 # ui_tk/app.py
 import os
+import tempfile
+import json
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 
@@ -13,6 +15,7 @@ from minflux_msr import (
 )
 from minflux_msr import state as MFSTATE
 from .field_dialog import FieldDialog
+from .plot_window import PlotWindow
 
 EXPORT_MODES = [
     "mfx",
@@ -61,10 +64,12 @@ class App(tk.Tk):
         self.geometry("650x780")
 
         # Inputs
+        system_tmp = tempfile.gettempdir()
+        settings = self._load_settings(system_tmp)
         self.mode = tk.StringVar(value="file")
         self.input_path = tk.StringVar(value="")
-        self.tmp_dir = tk.StringVar(value=r"C:/data/temp")
-        self.out_dir = tk.StringVar(value=r"C:/data/temp")  # Output folder (moved below tree)
+        self.tmp_dir = tk.StringVar(value=settings.get("tmp_dir") or system_tmp)
+        self.out_dir = tk.StringVar(value=settings.get("out_dir") or self.tmp_dir.get())  # Output folder (moved below tree)
 
         # Preview rows control
         self.preview_rows = tk.IntVar(value=100)
@@ -88,6 +93,39 @@ class App(tk.Tk):
         self.PREVIEW_N_DEFAULT = 100
 
         self._build_ui()
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _settings_path(self) -> Path:
+        return Path.home() / ".mfx_msr_gui_settings.json"
+
+    def _load_settings(self, system_tmp: str) -> Dict[str, str]:
+        p = self._settings_path()
+        try:
+            if p.exists():
+                data = json.loads(p.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    return {
+                        "tmp_dir": data.get("tmp_dir") if isinstance(data.get("tmp_dir"), str) else system_tmp,
+                        "out_dir": data.get("out_dir") if isinstance(data.get("out_dir"), str) else system_tmp,
+                    }
+        except Exception:
+            pass
+        return {"tmp_dir": system_tmp, "out_dir": system_tmp}
+
+    def _save_settings(self):
+        p = self._settings_path()
+        data = {
+            "tmp_dir": self.tmp_dir.get().strip() or tempfile.gettempdir(),
+            "out_dir": self.out_dir.get().strip() or self.tmp_dir.get().strip() or tempfile.gettempdir(),
+        }
+        try:
+            p.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        except Exception as e:
+            self.log(f"[warn] could not save settings: {e}")
+
+    def _on_close(self):
+        self._save_settings()
+        self.destroy()
 
     def _build_ui(self):
         pad = {"padx": 8, "pady": 6}
@@ -173,10 +211,13 @@ class App(tk.Tk):
             self.tmp_dir.set(p)
             if not self.out_dir.get():
                 self.out_dir.set(p)
+            self._save_settings()
 
     def browse_out(self):
         p = filedialog.askdirectory(title="Choose output folder")
-        if p: self.out_dir.set(p)
+        if p:
+            self.out_dir.set(p)
+            self._save_settings()
 
     # Logging
     def log(self, msg: str):
@@ -306,7 +347,10 @@ class App(tk.Tk):
         self._ctx_node = None
         self._ctx_menu = tk.Menu(self, tearoff=0)
         self._ctx_menu.add_command(label="Preview", command=self._ctx_preview)
+        self._ctx_menu.add_command(label="Plot…", command=self._ctx_plot)
         self._ctx_menu.add_command(label="Export to CSV…", command=self._ctx_export_csv)
+        self._ctx_menu.add_command(label="Export to NumPy (.npy)…", command=self._ctx_export_npy)
+        self._ctx_menu.add_command(label="Export to JSON…", command=self._ctx_export_json)
         self.tree.bind("<Button-3>", self._on_tree_right_click)  # Windows / most X11
         self.tree.bind("<Control-Button-1>", self._on_tree_right_click)  # fallback
 
@@ -321,7 +365,10 @@ class App(tk.Tk):
         kind = self.tree.set(row, "kind")
         # Export allowed for leaf 'field' or plain numeric 'array'
         can_export = (kind == "field") or (kind == "array")
+        self._ctx_menu.entryconfig("Plot…", state="normal" if can_export else "disabled")
         self._ctx_menu.entryconfig("Export to CSV…", state="normal" if can_export else "disabled")
+        self._ctx_menu.entryconfig("Export to NumPy (.npy)…", state="normal" if can_export else "disabled")
+        self._ctx_menu.entryconfig("Export to JSON…", state="normal" if can_export else "disabled")
         try:
             self._ctx_menu.tk_popup(event.x_root, event.y_root)
         finally:
@@ -332,7 +379,6 @@ class App(tk.Tk):
         """Recursively add dtype field nodes (supports nested structs)."""
         for sub in fields or []:
             text = sub.get("name", "")
-            print("debug: App, add dtype field node name: " + text)
             kind = "struct" if sub.get("children") else sub.get("kind", "field")
             shape = sub.get("logical_shape") or str(sub.get("shape") or ())
             dtype = sub.get("dtype", "")
@@ -388,28 +434,30 @@ class App(tk.Tk):
             return a.reshape(a.shape[0], -1)
         return a
 
-    def _ctx_preview(self):
-        """Preview first N entries of selected field/array in a popup window."""
+    def _resolve_context_array(self):
         node = self._ctx_node
         if not node:
-            return
+            return None, None, "Choose a field or array node."
         ds_node = self._dataset_node_of(node)
         if not ds_node:
-            return
-        zroot, did = self._zroot_did_for_dataset_node(ds_node)
+            return None, None, "Choose a field or array node."
+        zroot, _ = self._zroot_did_for_dataset_node(ds_node)
         if not zroot:
-            return
+            return None, None, "Dataset has no zarr root."
         path = self._full_path_for_node(node)
         if not path:
-            # If they right-clicked e.g. 'vld' subnode we stored that as path; if missing, bail
-            messagebox.showinfo("Preview", "Choose a field or array node.")
-            return
-
-        import numpy as np
+            return None, None, "Choose a field or array node."
         try:
             arr = self._load_array_for_path(zroot, path)
         except Exception as e:
-            messagebox.showerror("Preview error", f"Cannot load {path}:\n{e}")
+            return None, None, f"Cannot load {path}:\n{e}"
+        return path, arr, None
+
+    def _ctx_preview(self):
+        """Preview first N entries of selected field/array in a popup window."""
+        path, arr, err = self._resolve_context_array()
+        if err:
+            messagebox.showinfo("Preview", err)
             return
 
         N = min(int(self.preview_rows.get()), arr.shape[0] if hasattr(arr, "shape") and arr.ndim >= 1 else 0)
@@ -431,41 +479,57 @@ class App(tk.Tk):
         tv.pack(fill="both", expand=True, padx=8, pady=8)
         ttk.Button(win, text="Close", command=win.destroy).pack(pady=(0,8))
 
+    def _ctx_plot(self):
+        path, arr, err = self._resolve_context_array()
+        if err:
+            messagebox.showinfo("Plot", err)
+            return
+
+        import numpy as np
+        data = np.asarray(arr)
+        if data.size == 0:
+            messagebox.showinfo("Plot", "Selected data is empty.")
+            return
+        if not _is_numeric_dtype(data.dtype):
+            messagebox.showwarning("Plot", "Only numeric arrays/fields can be plotted.")
+            return
+        PlotWindow(self, data, title=f"Plot: {path}")
+
+    def _save_array_json(self, fname: str, arr):
+        import json
+        import numpy as np
+
+        a = np.asarray(arr)
+        names = getattr(getattr(a, "dtype", None), "names", None)
+        if names:
+            out = []
+            for row in a:
+                d = {}
+                for k in names:
+                    v = row[k]
+                    if isinstance(v, np.ndarray):
+                        d[k] = v.tolist()
+                    elif isinstance(v, np.generic):
+                        d[k] = v.item()
+                    else:
+                        d[k] = v
+                out.append(d)
+        else:
+            out = a.tolist()
+
+        with open(fname, "w", encoding="utf-8") as f:
+            json.dump(out, f, ensure_ascii=False)
+
     def _ctx_export_csv(self):
         """Export current selected field (or plain numeric array) to CSV."""
-        node = self._ctx_node
-        if not node:
-            return
-        kind = self.tree.set(node, "kind")
-        ds_node = self._dataset_node_of(node)
-        if not ds_node:
-            return
-        zroot, did = self._zroot_did_for_dataset_node(ds_node)
-        path = self._full_path_for_node(node)
-
-        if not path:
-            messagebox.showinfo("Export", "Choose a field or array node.")
+        path, data, err = self._resolve_context_array()
+        if err:
+            messagebox.showinfo("Export", err)
             return
 
-        import numpy as np, zarr
-        arch = zarr.open(zroot, mode="r")
-        # For arrays with structured dtype, require a sub-field; otherwise export the array itself
-        if kind == "array":
-            arr = arch[path]
-            if getattr(arr.dtype, "names", None):
-                messagebox.showwarning("Export",
-                                    "This is a structured array. Please right-click a sub-field (e.g. mfx/vld).")
-                return
-            data = np.asarray(arr)
-        else:  # 'field'
-            try:
-                data = self._load_array_for_path(zroot, path)
-            except Exception as e:
-                messagebox.showerror("Export error", f"Cannot load {path}:\n{e}")
-                return
-
+        import numpy as np
         # choose file
-        default = f"{Path(zroot).parent.name}_{path.replace('/','_')}.csv"
+        default = f"{Path(path).name.replace('/','_')}.csv"
         fname = filedialog.asksaveasfilename(
             title="Export to CSV",
             defaultextension=".csv",
@@ -481,6 +545,49 @@ class App(tk.Tk):
             messagebox.showinfo("Export", f"Saved:\n{fname}")
         except Exception as e:
             messagebox.showerror("Export error", f"Failed to save CSV:\n{e}")
+
+    def _ctx_export_npy(self):
+        path, data, err = self._resolve_context_array()
+        if err:
+            messagebox.showinfo("Export", err)
+            return
+        default = f"{Path(path).name.replace('/','_')}.npy"
+        fname = filedialog.asksaveasfilename(
+            title="Export to NumPy (.npy)",
+            defaultextension=".npy",
+            initialfile=default,
+            filetypes=[("NumPy", "*.npy"), ("All files", "*.*")],
+        )
+        if not fname:
+            return
+        import numpy as np
+        try:
+            np.save(fname, data, allow_pickle=False)
+            self.log(f"[export] wrote {fname}")
+            messagebox.showinfo("Export", f"Saved:\n{fname}")
+        except Exception as e:
+            messagebox.showerror("Export error", f"Failed to save NPY:\n{e}")
+
+    def _ctx_export_json(self):
+        path, data, err = self._resolve_context_array()
+        if err:
+            messagebox.showinfo("Export", err)
+            return
+        default = f"{Path(path).name.replace('/','_')}.json"
+        fname = filedialog.asksaveasfilename(
+            title="Export to JSON",
+            defaultextension=".json",
+            initialfile=default,
+            filetypes=[("JSON", "*.json"), ("All files", "*.*")],
+        )
+        if not fname:
+            return
+        try:
+            self._save_array_json(fname, data)
+            self.log(f"[export] wrote {fname}")
+            messagebox.showinfo("Export", f"Saved:\n{fname}")
+        except Exception as e:
+            messagebox.showerror("Export error", f"Failed to save JSON:\n{e}")
 
     # Fields dialog placeholder (kept)
     def _gather_datasets_for_dialog(self) -> List[dict]:
@@ -738,6 +845,7 @@ class App(tk.Tk):
     
     # Main export button
     def on_ok(self):
+        self._save_settings()
         out_dir = self.out_dir.get().strip() or self.tmp_dir.get().strip()
         if not out_dir:
             from tkinter import messagebox

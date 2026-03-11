@@ -7,13 +7,14 @@ readme = "README.md"
 packages = [{include = "minflux_msr"}, {include = "ui_tk"}]
 
 [tool.poetry.dependencies]
-python = ">=3.9,<3.15"
-numpy = ">=1.21,<2.0"
+python = ">=3.12,<3.13"
+numpy = ">=2.0,<3.0"
 scipy = ">=1.8,<2.0"
 tifffile = "^2024.2"
 click = "^8.1"
 zarr = "^2.17.0"
-specpy = { path = "C:/Imspector/Versions/16.3.21317-m2410-win64-BASE/python/specpy/SpecPy-Python3.9.2-NumPy1.20.1/specpy-1.2.3-cp39-cp39-win_amd64.whl" }
+matplotlib = "^3.9"
+specpy = { path = "./SpecPy-Python3.12.4-NumPy2.0.0" }
 msr-reader = "*"    # Legacy MSR/OBF reader (module is `msr_reader`)
 orjson = { version = "^3.9", optional = true }
 hdf5storage = { version = "^0.1.19", optional = true }
